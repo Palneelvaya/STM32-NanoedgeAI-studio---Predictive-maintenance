@@ -1,0 +1,1 @@
+# STM32-NanoedgeAI-studio---Predictive-maintenance
