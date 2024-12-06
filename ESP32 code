@@ -1,0 +1,197 @@
+#include <WiFi.h>
+
+// Replace with your network credentials
+const char* ssid = "A";
+const char* password = "12345678";
+
+// Set web server port number to 80
+WiFiServer server(80);
+
+// Variable to store the HTTP request
+String header;
+
+// Variable to store the current system condition
+String systemCondition = "Normal Condition";
+
+// GPIO pins configuration
+const int maintenancePin = 16;      // GPIO16 for "Maintenance Required Soon"
+const int criticalFaultPin = 17;    // GPIO17 for "Critical Fault"
+
+// Timing variables
+unsigned long currentTime = millis();
+unsigned long previousTime = 0;
+const long timeoutTime = 2000;      // Timeout time in milliseconds
+
+void setup() {
+  Serial.begin(115200);  // Initialize serial communication for debugging
+
+  // Initialize GPIO pins as inputs with internal pull-down resistors
+  pinMode(maintenancePin, INPUT_PULLDOWN);
+  pinMode(criticalFaultPin, INPUT_PULLDOWN);
+
+  // Connect to Wi-Fi network
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  // Wait until the ESP32 is connected to the Wi-Fi network
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  // Print the IP address
+  Serial.println("\nWiFi connected.");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Start the web server
+  server.begin();
+}
+
+void loop() {
+  // Read the state of the GPIO pins
+  int maintenanceState = digitalRead(maintenancePin);
+  int criticalFaultState = digitalRead(criticalFaultPin);
+
+  // Update the system condition based on pin states with priority
+  if (criticalFaultState == HIGH) {
+    systemCondition = "Critical Fault: Immediate Maintenance Required";
+  } else if (maintenanceState == HIGH) {
+    systemCondition = "Maintenance Required Soon";
+  } else {
+    systemCondition = "Normal Condition";
+  }
+
+  // Listen for incoming clients
+  WiFiClient client = server.available();
+
+  if (client) {
+    currentTime = millis();
+    previousTime = currentTime;
+    Serial.println("New Client connected.");
+    String currentLine = "";
+
+    // Loop while the client's connected and within the timeout period
+    while (client.connected() && currentTime - previousTime <= timeoutTime) {
+      currentTime = millis();
+
+      // Check if there's incoming data from the client
+      if (client.available()) {
+        char c = client.read();
+        Serial.write(c);  // Echo the data to the serial monitor
+        header += c;
+
+        // If the byte is a newline character
+        if (c == '\n') {
+          // If the current line is blank, the HTTP request has ended
+          if (currentLine.length() == 0) {
+            // Parse the first line of the header to get the request path
+            // e.g., GET /status HTTP/1.1
+            int firstLineEnd = header.indexOf('\n');
+            String firstLine = header.substring(0, firstLineEnd);
+            int pathStart = firstLine.indexOf(' ') + 1;
+            int pathEnd = firstLine.indexOf(' ', pathStart);
+            String path = firstLine.substring(pathStart, pathEnd);
+
+            // Send appropriate response based on the path
+            if (path.equals("/status")) {
+              // Send HTTP response headers
+              client.println("HTTP/1.1 200 OK");
+              client.println("Content-type: application/json");
+              client.println("Connection: close");
+              client.println();
+
+              // Send the system condition and symbol as JSON
+              client.print("{\"status\":\"");
+              client.print(systemCondition);
+              client.print("\",\"symbol\":\"");
+
+              if (systemCondition == "Normal Condition") {
+                client.print("&#x2705;");  // ✅
+              } else if (systemCondition == "Maintenance Required Soon") {
+                client.print("&#x26A0;");  // ⚠️
+              } else if (systemCondition == "Critical Fault: Immediate Maintenance Required") {
+                client.print("&#x274C;");  // ❌
+              }
+
+              client.println("\"}");
+
+              // Break out of the while loop
+              break;
+            } else {
+              // Send the main page
+              // Send HTTP response headers
+              client.println("HTTP/1.1 200 OK");
+              client.println("Content-type:text/html");
+              client.println("Connection: close");
+              client.println();
+
+              // Start of HTML content
+              client.println("<!DOCTYPE html><html>");
+              client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+              client.println("<link rel=\"icon\" href=\"data:,\">");
+
+              // JavaScript to fetch status and update the page
+              client.println("<script>");
+              client.println("function fetchStatus() {");
+              client.println("  var xhr = new XMLHttpRequest();");
+              client.println("  xhr.onreadystatechange = function() {");
+              client.println("    if (xhr.readyState == XMLHttpRequest.DONE) {");
+              client.println("      if (xhr.status == 200) {");
+              client.println("        var response = JSON.parse(xhr.responseText);");
+              client.println("        var statusText = response.status;");
+              client.println("        var symbolText = response.symbol;");
+              client.println("        document.getElementById('status').innerHTML = statusText;");
+              client.println("        document.getElementById('symbol').innerHTML = symbolText;");
+              client.println("        if (statusText == 'Normal Condition') {");
+              client.println("          document.getElementById('status').style.color = 'green';");
+              client.println("        } else if (statusText == 'Maintenance Required Soon') {");
+              client.println("          document.getElementById('status').style.color = 'orange';");
+              client.println("        } else if (statusText == 'Critical Fault: Immediate Maintenance Required') {");
+              client.println("          document.getElementById('status').style.color = 'red';");
+              client.println("        }");
+              client.println("      }");
+              client.println("    }");
+              client.println("  }");
+              client.println("  xhr.open('GET', '/status', true);");
+              client.println("  xhr.send();");
+              client.println("}");
+              client.println("setInterval(fetchStatus, 1000);"); // Fetch status every 1 second
+              client.println("</script>");
+
+              // CSS styles
+              client.println("<style>");
+              client.println("html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}");
+              client.println("h1 { font-size: 50px; }");
+              client.println("#symbol { font-size: 100px; }");
+              client.println("</style></head>");
+
+              // Web page body
+              client.println("<body onload=\"fetchStatus()\"><h1>ESP32 Status</h1>");
+              client.println("<p><strong><h1 id=\"status\">Loading...</h1></strong></p>");
+              client.println("<p><span id=\"symbol\"></span></p>");
+
+              // End of HTML content
+              client.println("</body></html>");
+
+              // The HTTP response ends with another blank line
+              client.println();
+              break;  // Exit the while loop
+            }
+          } else {
+            currentLine = "";  // Clear currentLine for the next line
+          }
+        } else if (c != '\r') {
+          currentLine += c;  // Add character to currentLine
+        }
+      }
+    }
+
+    // Clear the header variable
+    header = "";
+    // Close the client connection
+    client.stop();
+    Serial.println("Client disconnected.\n");
+  }
+}
